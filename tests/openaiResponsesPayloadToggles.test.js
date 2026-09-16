@@ -180,6 +180,59 @@ describe('openai responses payload toggles', () => {
     openaiAccountService.decrypt.mockReturnValue('decrypted-token')
   })
 
+  test.each(['response.completed', 'response.failed'])(
+    'diagnostics observes %s without modifying streamed bytes',
+    async (eventType) => {
+      const { PassThrough } = require('stream')
+      const { EventEmitter } = require('events')
+      const stream = new PassThrough()
+      unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+        accountId: 'a',
+        accountType: 'openai'
+      })
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'a',
+        accessToken: 'encrypted',
+        codexNativePassthrough: true
+      })
+      axios.post.mockResolvedValue({
+        status: 200,
+        data: stream,
+        headers: { 'x-request-id': 'upstream-test' }
+      })
+      const { IncrementalSSEParser } = require('../src/utils/sseParser')
+      IncrementalSSEParser.mockImplementation(() => ({
+        feed: () => [{ type: 'data', data: { type: eventType, response: {} } }],
+        getRemaining: () => ''
+      }))
+      const req = createReq({
+        userAgent: 'codex-tui/0.154.0',
+        body: { model: 'gpt-test', stream: true }
+      })
+      req.on = new EventEmitter().on.bind(new EventEmitter())
+      req.requestId = 'local-stream-test'
+      const res = createRes()
+      res.write = jest.fn()
+      res.end = jest.fn()
+      await openaiRoutes.handleResponses(req, res)
+      const raw = Buffer.from('data: original bytes\n\n')
+      stream.end(raw)
+      await new Promise(setImmediate)
+      expect(res.write).toHaveBeenCalledWith(raw)
+      expect(res.end).toHaveBeenCalled()
+      const logs = require('../src/utils/logger')
+        .info.mock.calls.filter(([name]) => name === 'OpenAI diagnostic')
+        .map(([, record]) => record)
+      expect(logs.find((r) => r.signal === 'upstream_end')).toMatchObject({
+        requestId: 'local-stream-test',
+        upstreamRequestId: 'upstream-test',
+        completed: eventType === 'response.completed',
+        failed: eventType === 'response.failed',
+        bytes: raw.length
+      })
+    }
+  )
+
   test.each(
     [undefined, false, 'false', true, 'true'].flatMap((mode) =>
       ['/v1/responses', '/v1/responses/compact'].map((path) => [mode, path])

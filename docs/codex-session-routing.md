@@ -65,3 +65,21 @@ Deployment image: `claude-relay-service:1.1.315-account-native-toggle`.
 `Dockerfile.codex-fix` builds the admin UI and overlays only the changed backend
 files onto the official v1.1.315 image. To restore official behavior for all
 accounts immediately, deploy `weishaw/claude-relay-service:1.1.315` with `--no-build`.
+
+### Request diagnostics
+
+`OpenAI diagnostic` records correlate `request`, `headers`, terminal SSE `event`,
+`transport_error`, and `lifecycle` records with the local request ID and upstream
+request ID (when supplied). Request summaries include keyed canonical JSON hashes
+before/after forwarding, JSON byte lengths, model/reasoning settings, input/tool
+counts, and keyed fingerprints of session/cache/turn identifiers. Hashes use the
+server encryption secret and do not store request text or authorization headers.
+
+Terminal events distinguish completed, failed and incomplete responses from an
+HTTP 200 response that ends without completion. Lifecycle records include observed
+bytes, time to first chunk, bounded event counts, and client/upstream close signals.
+A request `close` event alone is not proof of a client disconnect: check
+`requestComplete`, response `writableFinished`, and upstream `readableEnded`.
+Error messages are represented only by a keyed hash and length; machine-readable
+error codes/types are retained. Existing forwarding, scheduling and rate-limit
+handling are unchanged. These diagnostics are not retrospective.

@@ -1,3 +1,4 @@
+const { createDiagnostics } = require('../utils/openaiDiagnostics')
 const express = require('express')
 const axios = require('axios')
 const router = express.Router()
@@ -298,6 +299,7 @@ const handleResponses = async (req, res) => {
   let account = null
   let proxy = null
   let accessToken = null
+  let diagnostics = null
 
   try {
     // 从中间件获取 API Key 数据
@@ -491,6 +493,25 @@ const handleResponses = async (req, res) => {
       ? 'https://chatgpt.com/backend-api/codex/responses/compact'
       : 'https://chatgpt.com/backend-api/codex/responses'
 
+    diagnostics = createDiagnostics(
+      req,
+      originalBody,
+      req.body,
+      headers,
+      accountId,
+      nativePassthrough
+    )
+    res.on?.('finish', () => diagnostics.signal('client_response_finish'))
+    res.on?.('close', () =>
+      diagnostics.signal('client_response_close', {
+        writableFinished: Boolean(res.writableFinished)
+      })
+    )
+    req.on?.('aborted', () => diagnostics.signal('client_request_aborted'))
+    req.on?.('close', () =>
+      diagnostics.signal('client_request_close', { requestComplete: Boolean(req.complete) })
+    )
+
     // 根据 stream 参数决定请求类型
     if (isStream) {
       // 流式请求
@@ -501,6 +522,16 @@ const handleResponses = async (req, res) => {
     } else {
       // 非流式请求
       upstream = await axios.post(codexEndpoint, req.body, axiosConfig)
+    }
+
+    diagnostics.headers(upstream)
+    if (isStream && upstream.data?.on) {
+      upstream.data.on('aborted', () => diagnostics.signal('upstream_aborted'))
+      upstream.data.on('close', () =>
+        diagnostics.signal('upstream_close', {
+          readableEnded: Boolean(upstream.data.readableEnded)
+        })
+      )
     }
 
     const codexUsageSnapshot = extractCodexUsageHeaders(upstream.headers)
@@ -545,6 +576,7 @@ const handleResponses = async (req, res) => {
           errorData = upstream.data
         }
 
+        if (errorData?.error) diagnostics.error(errorData.error)
         // 提取重置时间
         if (errorData && errorData.error && errorData.error.resets_in_seconds) {
           resetsInSeconds = errorData.error.resets_in_seconds
@@ -624,6 +656,7 @@ const handleResponses = async (req, res) => {
         logger.error(`⚠️ Failed to handle ${unauthorizedStatus} error response:`, parseError)
       }
 
+      if (errorData?.error) diagnostics.error(errorData.error)
       const statusLabel = unauthorizedStatus === 401 ? '401错误' : '402错误'
       const extraHint = unauthorizedStatus === 402 ? '，可能欠费' : ''
       let reason = `OpenAI账号认证失败（${statusLabel}${extraHint}）`
@@ -725,6 +758,7 @@ const handleResponses = async (req, res) => {
 
         // 直接获取完整响应
         const responseData = upstream.data
+        diagnostics.signal('nonstream_response', { hasUsage: Boolean(upstream.data?.usage) })
 
         // 从响应中获取实际的 model 和 usage
         actualModel = responseData.model || upstreamRequestedModel || 'gpt-4'
@@ -793,6 +827,7 @@ const handleResponses = async (req, res) => {
 
     // 处理解析出的事件
     const processSSEEvent = (eventData) => {
+      diagnostics.event(eventData)
       // 检查是否是 response.completed 事件
       if (eventData.type === 'response.completed' && eventData.response) {
         // 从响应中获取真实的 model
@@ -821,6 +856,7 @@ const handleResponses = async (req, res) => {
     }
 
     upstream.data.on('data', (chunk) => {
+      diagnostics.chunk(chunk)
       try {
         // 转发数据给客户端
         if (!res.destroyed) {
@@ -851,6 +887,7 @@ const handleResponses = async (req, res) => {
         }
       }
 
+      diagnostics.signal('upstream_end')
       // 记录使用统计
       if (!usageReported && usageData) {
         try {
@@ -927,6 +964,8 @@ const handleResponses = async (req, res) => {
     })
 
     upstream.data.on('error', (err) => {
+      diagnostics.error(err)
+      diagnostics.signal('upstream_error')
       logger.error('Upstream stream error:', err)
       if (!res.headersSent) {
         res.status(502).json({ error: { message: 'Upstream stream error' } })
@@ -947,6 +986,7 @@ const handleResponses = async (req, res) => {
     req.on('close', cleanup)
     req.on('aborted', cleanup)
   } catch (error) {
+    diagnostics?.error(error)
     logger.error('Proxy to ChatGPT codex/responses failed:', error)
     // 优先使用主动设置的 statusCode，然后是上游响应的状态码，最后默认 500
     const status = error.statusCode || error.response?.status || 500

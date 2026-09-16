@@ -12,3 +12,6 @@
 !web/admin-spa/**
 web/admin-spa/node_modules
 web/admin-spa/dist
+
+!src/utils/
+!src/utils/openaiDiagnostics.js

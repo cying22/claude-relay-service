@@ -6,6 +6,7 @@ COPY web/admin-spa/ ./
 RUN npm run build
 
 FROM weishaw/claude-relay-service:1.1.315
+COPY src/utils/openaiDiagnostics.js /app/src/utils/openaiDiagnostics.js
 COPY src/routes/openaiRoutes.js /app/src/routes/openaiRoutes.js
 COPY src/routes/admin/openaiAccounts.js /app/src/routes/admin/openaiAccounts.js
 COPY src/services/account/openaiAccountService.js /app/src/services/account/openaiAccountService.js
