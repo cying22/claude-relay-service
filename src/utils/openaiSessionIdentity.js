@@ -22,7 +22,7 @@ function canonical(value) {
 
 // Content fallback groups cache routing only; it must never restore another
 // request's previous_response_id or opaque turn state from a shared cache.
-function resolveSession(headers = {}, body = {}) {
+function resolveSession(headers = {}, body = {}, { allowContextFallback = true } = {}) {
   const candidates = [
     ['session_id', headers.session_id],
     ['conversation_id', headers.conversation_id],
@@ -38,7 +38,7 @@ function resolveSession(headers = {}, body = {}) {
 
   // A response continuation already has its own identity. Don't infer it from
   // the new input alone. Short greetings are also too ambiguous to merge.
-  if (body.previous_response_id || body.conversation) return null
+  if (!allowContextFallback || body.previous_response_id || body.conversation) return null
   const items = Array.isArray(body.input) ? body.input : body.messages
   if (!Array.isArray(items)) return null
   const index = items.findIndex((item) => item.role === 'user')

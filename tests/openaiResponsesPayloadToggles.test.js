@@ -184,7 +184,64 @@ describe('openai responses payload toggles', () => {
     openaiAccountService.decrypt.mockReturnValue('decrypted-token')
   })
 
-  test('isolates upstream session and passes turn state in both directions', async () => {
+  test.each(['codex-tui/0.154.0', 'Codex Desktop/0.154.0-alpha.6.2'])(
+    'preserves native payload and session headers in both directions: %s',
+    async (userAgent) => {
+      unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+        accountId: 'openai-1',
+        accountType: 'openai'
+      })
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'openai-1',
+        accessToken: 'encrypted',
+        accountId: 'upstream-1'
+      })
+      axios.post.mockResolvedValue({
+        status: 200,
+        data: { output: [] },
+        headers: { 'x-codex-turn-state': 'next-state', 'x-codex-turn-metadata': 'next-meta' }
+      })
+      const req = createReq({
+        userAgent,
+        apiKeyOverrides: {
+          enableOpenAIResponsesPayloadRules: true,
+          openaiResponsesPayloadRules: [{ path: 'model', valueType: 'string', value: 'rewritten' }]
+        },
+        body: {
+          model: 'gpt-6-astra',
+          stream: false,
+          instructions: 'original',
+          prompt_cache_key: 'cache-a',
+          store: false,
+          prompt_cache_options: { ttl: '30m' },
+          text: { verbosity: 'low' },
+          service_tier: 'priority'
+        }
+      })
+      req.headers.session_id = 'conversation-a'
+      req.headers.conversation_id = 'conversation-b'
+      req.headers.originator = 'client-originator'
+      req.headers['x-codex-turn-state'] = 'previous-state'
+      req.headers['x-codex-turn-metadata'] = 'previous-meta'
+      const res = createRes()
+      const originalBody = JSON.parse(JSON.stringify(req.body))
+      await openaiRoutes.handleResponses(req, res)
+      const forwarded = axios.post.mock.calls[0]
+      const headers = forwarded[2].headers
+      expect(headers.session_id).toBe('conversation-a')
+      expect(headers.conversation_id).toBe('conversation-b')
+      expect(headers['user-agent']).toBe(userAgent)
+      expect(headers.originator).toBe('client-originator')
+      expect(forwarded[1]).toEqual(originalBody)
+      expect(headers['x-codex-turn-state']).toBe('previous-state')
+      expect(headers['x-codex-turn-metadata']).toBe('previous-meta')
+      expect(forwarded[1].instructions).toBe('original')
+      expect(res.headers['x-codex-turn-state']).toBe('next-state')
+      expect(res.headers['x-codex-turn-metadata']).toBe('next-meta')
+    }
+  )
+
+  test('does not inject native session IDs, cache keys or store when absent', async () => {
     unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
       accountId: 'openai-1',
       accountType: 'openai'
@@ -194,36 +251,24 @@ describe('openai responses payload toggles', () => {
       accessToken: 'encrypted',
       accountId: 'upstream-1'
     })
-    axios.post.mockResolvedValue({
-      status: 200,
-      data: { output: [] },
-      headers: { 'x-codex-turn-state': 'next-state', 'x-codex-turn-metadata': 'next-meta' }
-    })
-    const req = createReq({
-      userAgent: 'codex-tui/0.154.0',
-      body: {
-        model: 'gpt-6-astra',
-        stream: false,
-        instructions: 'original',
-        prompt_cache_key: 'conversation-a'
-      }
-    })
-    req.headers.session_id = 'conversation-a'
-    req.headers.conversation_id = 'conversation-a'
-    req.headers['x-codex-turn-state'] = 'previous-state'
-    req.headers['x-codex-turn-metadata'] = 'previous-meta'
-    const res = createRes()
-    await openaiRoutes.handleResponses(req, res)
+    axios.post.mockResolvedValue({ status: 200, data: { output: [] }, headers: {} })
+    const body = {
+      model: 'gpt-5-2025-08-07',
+      stream: false,
+      input: [{ role: 'user', content: 'Long enough to trigger context fallback. '.repeat(10) }]
+    }
+    const req = createReq({ userAgent: 'codex-tui/0.154.0', body })
+    await openaiRoutes.handleResponses(req, createRes())
     const forwarded = axios.post.mock.calls[0]
-    const headers = forwarded[2].headers
-    expect(headers.session_id).not.toBe('conversation-a')
-    expect(headers.session_id).toBe(headers.conversation_id)
-    expect(headers.session_id).toBe(forwarded[1].prompt_cache_key)
-    expect(headers['x-codex-turn-state']).toBe('previous-state')
-    expect(headers['x-codex-turn-metadata']).toBe('previous-meta')
-    expect(forwarded[1].instructions).toBe('original')
-    expect(res.headers['x-codex-turn-state']).toBe('next-state')
-    expect(res.headers['x-codex-turn-metadata']).toBe('next-meta')
+    expect(forwarded[1]).toEqual(body)
+    expect(forwarded[2].headers.session_id).toBeUndefined()
+    expect(forwarded[2].headers.conversation_id).toBeUndefined()
+    expect(forwarded[2].headers['x-codex-turn-state']).toBeUndefined()
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
+      req.apiKey,
+      null,
+      body.model
+    )
   })
 
   test('keeps standard responses payload unchanged for openai-responses when both toggles are off', async () => {

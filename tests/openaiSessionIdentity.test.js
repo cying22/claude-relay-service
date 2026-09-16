@@ -9,6 +9,13 @@ const body = () => ({
   ]
 })
 
+test('native mode only uses explicit client identity', () => {
+  expect(resolveSession({}, body(), { allowContextFallback: false })).toBeNull()
+  expect(
+    resolveSession({}, { ...body(), prompt_cache_key: 'native' }, { allowContextFallback: false })
+  ).toEqual({ source: 'prompt_cache_key', raw: 'native' })
+})
+
 test('explicit session wins over context and cache key', () => {
   expect(
     resolveSession(

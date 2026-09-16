@@ -331,7 +331,8 @@ const handleResponses = async (req, res) => {
     if (shouldUseToggleControlledFlow) {
       const shouldApplyCodexAdaptation =
         apiKeyData.enableOpenAIResponsesCodexAdaptation === true && !isCodexCLI
-      const shouldApplyPayloadRules = apiKeyData.enableOpenAIResponsesPayloadRules === true
+      const shouldApplyPayloadRules =
+        apiKeyData.enableOpenAIResponsesPayloadRules === true && !isCodexCLI
 
       if (shouldApplyCodexAdaptation) {
         normalizeGpt5ModelForCodex(req.body)
@@ -351,7 +352,9 @@ const handleResponses = async (req, res) => {
         logger.info('🧩 Standard Responses request applied API key payload rules')
       }
     } else {
-      normalizeGpt5ModelForCodex(req.body)
+      if (!isCodexCLI) {
+        normalizeGpt5ModelForCodex(req.body)
+      }
 
       if (!isCodexCLI && !req._fromUnifiedEndpoint) {
         applyCodexCliAdaptation(req.body)
@@ -366,13 +369,15 @@ const handleResponses = async (req, res) => {
 
     // 从最终请求体中提取模型、会话 ID 和流式标志
     // NOTE: For some clients, prompt_cache_key is the only stable per-session key.
-    const sessionIdentity = resolveSession(req.headers, req.body)
+    const sessionIdentity = resolveSession(req.headers, req.body, {
+      allowContextFallback: !isCodexCLI
+    })
     const sessionId = scopeSession(apiKeyData.id, sessionIdentity)
 
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
     const requestedModel = req.body?.model || null
-    const schedulerModel = getCodexCompatibleModel(requestedModel)
+    const schedulerModel = isCodexCLI ? requestedModel : getCodexCompatibleModel(requestedModel)
     const isStream = req.body?.stream !== false // 默认为流式（兼容现有行为）
 
     if (schedulerModel !== requestedModel) {
@@ -411,6 +416,10 @@ const handleResponses = async (req, res) => {
       'openai-beta',
       'session_id',
       'conversation_id',
+      'x-session-id',
+      'user-agent',
+      'originator',
+      'accept-language',
       'x-codex-turn-state',
       'x-codex-turn-metadata'
     ]
@@ -422,24 +431,32 @@ const handleResponses = async (req, res) => {
       }
     }
 
-    applySession(headers, req.body, apiKeyData.id, accountId, sessionIdentity)
+    // Native clients own their upstream identifiers and opaque turn state.
+    // Namespacing is local to scheduler routing; never rewrite native payload IDs.
+    if (!isCodexCLI) {
+      applySession(headers, req.body, apiKeyData.id, accountId, sessionIdentity)
+    }
     logger.info('Codex session routing', {
       source: sessionIdentity?.source || 'none',
       sessionHash: sessionId?.slice(0, 16) || null,
       accountHash: crypto.createHash('sha256').update(accountId).digest('hex').slice(0, 16),
-      hasTurnState: Boolean(headers['x-codex-turn-state'])
+      hasTurnState: Boolean(headers['x-codex-turn-state']),
+      nativePassthrough: isCodexCLI
     })
 
     // 覆盖或新增必要头部
     headers['authorization'] = `Bearer ${accessToken}`
     headers['chatgpt-account-id'] = account.accountId || account.chatgptUserId || accountId
     headers['host'] = 'chatgpt.com'
-    headers['accept'] = isStream ? 'text/event-stream' : 'application/json'
-    headers['content-type'] = 'application/json'
-    if (!compactRoute) {
-      req.body['store'] = false
-    } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
-      delete req.body['store']
+    headers['accept'] =
+      (isCodexCLI && incoming.accept) || (isStream ? 'text/event-stream' : 'application/json')
+    headers['content-type'] = (isCodexCLI && incoming['content-type']) || 'application/json'
+    if (!isCodexCLI) {
+      if (!compactRoute) {
+        req.body['store'] = false
+      } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
+        delete req.body['store']
+      }
     }
 
     // 创建代理 agent
