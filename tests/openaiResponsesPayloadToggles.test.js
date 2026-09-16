@@ -105,7 +105,11 @@ const openaiResponsesRelayService = require('../src/services/relay/openaiRespons
 const openaiRoutes = require('../src/routes/openaiRoutes')
 
 function createHash(value) {
-  return crypto.createHash('sha256').update(value).digest('hex')
+  const { scopeSession } = require('../src/utils/openaiSessionIdentity')
+  return crypto
+    .createHash('sha256')
+    .update(scopeSession('key_1', { raw: value }))
+    .digest('hex')
 }
 
 function createReq({
@@ -180,6 +184,48 @@ describe('openai responses payload toggles', () => {
     openaiAccountService.decrypt.mockReturnValue('decrypted-token')
   })
 
+  test('isolates upstream session and passes turn state in both directions', async () => {
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+      accountId: 'openai-1',
+      accountType: 'openai'
+    })
+    openaiAccountService.getAccount.mockResolvedValue({
+      id: 'openai-1',
+      accessToken: 'encrypted',
+      accountId: 'upstream-1'
+    })
+    axios.post.mockResolvedValue({
+      status: 200,
+      data: { output: [] },
+      headers: { 'x-codex-turn-state': 'next-state', 'x-codex-turn-metadata': 'next-meta' }
+    })
+    const req = createReq({
+      userAgent: 'codex-tui/0.154.0',
+      body: {
+        model: 'gpt-6-astra',
+        stream: false,
+        instructions: 'original',
+        prompt_cache_key: 'conversation-a'
+      }
+    })
+    req.headers.session_id = 'conversation-a'
+    req.headers.conversation_id = 'conversation-a'
+    req.headers['x-codex-turn-state'] = 'previous-state'
+    req.headers['x-codex-turn-metadata'] = 'previous-meta'
+    const res = createRes()
+    await openaiRoutes.handleResponses(req, res)
+    const forwarded = axios.post.mock.calls[0]
+    const headers = forwarded[2].headers
+    expect(headers.session_id).not.toBe('conversation-a')
+    expect(headers.session_id).toBe(headers.conversation_id)
+    expect(headers.session_id).toBe(forwarded[1].prompt_cache_key)
+    expect(headers['x-codex-turn-state']).toBe('previous-state')
+    expect(headers['x-codex-turn-metadata']).toBe('previous-meta')
+    expect(forwarded[1].instructions).toBe('original')
+    expect(res.headers['x-codex-turn-state']).toBe('next-state')
+    expect(res.headers['x-codex-turn-metadata']).toBe('next-meta')
+  })
+
   test('keeps standard responses payload unchanged for openai-responses when both toggles are off', async () => {
     const req = createReq({
       body: {
@@ -208,6 +254,39 @@ describe('openai responses payload toggles', () => {
       'gpt-5'
     )
   })
+
+  test.each([
+    'codex-tui/0.154.0 (Ubuntu 26.4.0; x86_64) VTE/8400 (codex-tui; 0.154.0)',
+    'Codex Desktop/0.154.0-alpha.6.2 (Windows 10.0.26200; x86_64) unknown',
+    'codex_vscode/0.35.0',
+    'codex_cli_rs/0.38.0',
+    'codex_exec/0.89.0'
+  ])('preserves native Codex payload with adaptation enabled: %s', async (userAgent) => {
+    const body = {
+      model: 'gpt-6-astra',
+      instructions: 'Original client instructions',
+      service_tier: 'priority',
+      text: { verbosity: 'low' },
+      prompt_cache_key: 'stable-session',
+      prompt_cache_retention: '24h',
+      prompt_cache_options: { ttl: '30m' }
+    }
+    const req = createReq({ userAgent, body })
+
+    await openaiRoutes.handleResponses(req, createRes())
+
+    expect(req.body).toEqual(body)
+    expect(openaiResponsesRelayService.handleRequest).toHaveBeenCalled()
+  })
+
+  test.each(['my-client/1.0', 'codex-tui-impostor/0.154.0', 'Codex Desktop/invalid'])(
+    'retains adaptation for non-Codex clients: %s',
+    async (userAgent) => {
+      const req = createReq({ userAgent, body: { instructions: 'original' } })
+      await openaiRoutes.handleResponses(req, createRes())
+      expect(req.body.instructions).toBe(openaiRoutes.CODEX_CLI_INSTRUCTIONS)
+    }
+  )
 
   test('applies Codex adaptation only when adaptation toggle is on', async () => {
     const req = createReq({
