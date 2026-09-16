@@ -331,8 +331,7 @@ const handleResponses = async (req, res) => {
     if (shouldUseToggleControlledFlow) {
       const shouldApplyCodexAdaptation =
         apiKeyData.enableOpenAIResponsesCodexAdaptation === true && !isCodexCLI
-      const shouldApplyPayloadRules =
-        apiKeyData.enableOpenAIResponsesPayloadRules === true && !isCodexCLI
+      const shouldApplyPayloadRules = apiKeyData.enableOpenAIResponsesPayloadRules === true
 
       if (shouldApplyCodexAdaptation) {
         normalizeGpt5ModelForCodex(req.body)
@@ -352,9 +351,7 @@ const handleResponses = async (req, res) => {
         logger.info('🧩 Standard Responses request applied API key payload rules')
       }
     } else {
-      if (!isCodexCLI) {
-        normalizeGpt5ModelForCodex(req.body)
-      }
+      normalizeGpt5ModelForCodex(req.body)
 
       if (!isCodexCLI && !req._fromUnifiedEndpoint) {
         applyCodexCliAdaptation(req.body)
@@ -369,15 +366,13 @@ const handleResponses = async (req, res) => {
 
     // 从最终请求体中提取模型、会话 ID 和流式标志
     // NOTE: For some clients, prompt_cache_key is the only stable per-session key.
-    const sessionIdentity = resolveSession(req.headers, req.body, {
-      allowContextFallback: !isCodexCLI
-    })
+    const sessionIdentity = resolveSession(req.headers, req.body)
     const sessionId = scopeSession(apiKeyData.id, sessionIdentity)
 
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
     const requestedModel = req.body?.model || null
-    const schedulerModel = isCodexCLI ? requestedModel : getCodexCompatibleModel(requestedModel)
+    const schedulerModel = getCodexCompatibleModel(requestedModel)
     const isStream = req.body?.stream !== false // 默认为流式（兼容现有行为）
 
     if (schedulerModel !== requestedModel) {
@@ -416,10 +411,6 @@ const handleResponses = async (req, res) => {
       'openai-beta',
       'session_id',
       'conversation_id',
-      'x-session-id',
-      'user-agent',
-      'originator',
-      'accept-language',
       'x-codex-turn-state',
       'x-codex-turn-metadata'
     ]
@@ -431,32 +422,24 @@ const handleResponses = async (req, res) => {
       }
     }
 
-    // Native clients own their upstream identifiers and opaque turn state.
-    // Namespacing is local to scheduler routing; never rewrite native payload IDs.
-    if (!isCodexCLI) {
-      applySession(headers, req.body, apiKeyData.id, accountId, sessionIdentity)
-    }
+    applySession(headers, req.body, apiKeyData.id, accountId, sessionIdentity)
     logger.info('Codex session routing', {
       source: sessionIdentity?.source || 'none',
       sessionHash: sessionId?.slice(0, 16) || null,
       accountHash: crypto.createHash('sha256').update(accountId).digest('hex').slice(0, 16),
-      hasTurnState: Boolean(headers['x-codex-turn-state']),
-      nativePassthrough: isCodexCLI
+      hasTurnState: Boolean(headers['x-codex-turn-state'])
     })
 
     // 覆盖或新增必要头部
     headers['authorization'] = `Bearer ${accessToken}`
     headers['chatgpt-account-id'] = account.accountId || account.chatgptUserId || accountId
     headers['host'] = 'chatgpt.com'
-    headers['accept'] =
-      (isCodexCLI && incoming.accept) || (isStream ? 'text/event-stream' : 'application/json')
-    headers['content-type'] = (isCodexCLI && incoming['content-type']) || 'application/json'
-    if (!isCodexCLI) {
-      if (!compactRoute) {
-        req.body['store'] = false
-      } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
-        delete req.body['store']
-      }
+    headers['accept'] = isStream ? 'text/event-stream' : 'application/json'
+    headers['content-type'] = 'application/json'
+    if (!compactRoute) {
+      req.body['store'] = false
+    } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
+      delete req.body['store']
     }
 
     // 创建代理 agent
@@ -662,7 +645,7 @@ const handleResponses = async (req, res) => {
 
       res.status(unauthorizedStatus).json(errorResponse)
       return
-    } else if (!isStream && (upstream.status === 200 || upstream.status === 201)) {
+    } else if (upstream.status === 200 || upstream.status === 201) {
       // 请求成功，检查并移除限流状态
       const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
       if (isRateLimited) {
@@ -787,33 +770,11 @@ const handleResponses = async (req, res) => {
 
     // 使用增量 SSE 解析器
     const sseParser = new IncrementalSSEParser()
-    let streamCompleted = false
-    let streamFailed = false
-    let streamBytes = 0
-    const streamDiagnostics = {
-      upstreamRequestId: upstream.headers?.['x-request-id'] || null,
-      upstreamStatus: upstream.status,
-      upstreamContentType: upstream.headers?.['content-type'] || null,
-      sessionHash: sessionId?.slice(0, 16) || null,
-      nativePassthrough: isCodexCLI
-    }
 
     // 处理解析出的事件
     const processSSEEvent = (eventData) => {
-      if (['error', 'response.failed', 'response.incomplete'].includes(eventData.type)) {
-        streamFailed = true
-        const failure = eventData.response?.error || eventData.error || eventData
-        logger.warn('Codex upstream stream failure', {
-          ...streamDiagnostics,
-          eventType: eventData.type,
-          errorType: typeof failure.type === 'string' ? failure.type.slice(0, 100) : null,
-          errorCode: typeof failure.code === 'string' ? failure.code.slice(0, 100) : null,
-          incompleteReason: eventData.response?.incomplete_details?.reason || null
-        })
-      }
       // 检查是否是 response.completed 事件
       if (eventData.type === 'response.completed' && eventData.response) {
-        streamCompleted = true
         // 从响应中获取真实的 model
         if (eventData.response.model) {
           actualModel = eventData.response.model
@@ -840,7 +801,6 @@ const handleResponses = async (req, res) => {
     }
 
     upstream.data.on('data', (chunk) => {
-      streamBytes += chunk.length
       try {
         // 转发数据给客户端
         if (!res.destroyed) {
@@ -932,7 +892,7 @@ const handleResponses = async (req, res) => {
           sessionHash,
           rateLimitResetsInSeconds
         )
-      } else if (upstream.status === 200 && streamCompleted && !streamFailed) {
+      } else if (upstream.status === 200) {
         // 流式请求成功，检查并移除限流状态
         const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
         if (isRateLimited) {
@@ -943,15 +903,6 @@ const handleResponses = async (req, res) => {
         }
       }
 
-      if (!streamCompleted || streamFailed) {
-        logger.warn('Codex upstream stream ended without successful completion', {
-          ...streamDiagnostics,
-          streamCompleted,
-          streamFailed,
-          streamBytes,
-          hasUsage: Boolean(usageData)
-        })
-      }
       res.end()
     })
 

@@ -184,133 +184,7 @@ describe('openai responses payload toggles', () => {
     openaiAccountService.decrypt.mockReturnValue('decrypted-token')
   })
 
-  test.each(['error', 'response.failed', 'response.completed'])(
-    'records actual stream outcome instead of treating HTTP 200 as completion: %s',
-    async (eventType) => {
-      const handlers = {}
-      const stream = {
-        on: jest.fn((name, fn) => {
-          handlers[name] = fn
-        })
-      }
-      const event =
-        eventType === 'error'
-          ? { type: 'error', code: 'server_error', message: 'private error text' }
-          : {
-              type: eventType,
-              response:
-                eventType === 'response.failed'
-                  ? { error: { code: 'server_error', message: 'private error text' } }
-                  : { model: 'gpt-6-astra' }
-            }
-      require('../src/utils/sseParser').IncrementalSSEParser.mockImplementationOnce(() => ({
-        feed: () => [{ type: 'data', data: event }],
-        getRemaining: () => ''
-      }))
-      unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
-        accountId: 'openai-1',
-        accountType: 'openai'
-      })
-      unifiedOpenAIScheduler.isAccountRateLimited.mockResolvedValue(true)
-      openaiAccountService.getAccount.mockResolvedValue({
-        id: 'openai-1',
-        accessToken: 'encrypted'
-      })
-      axios.post.mockResolvedValue({
-        status: 200,
-        data: stream,
-        headers: {
-          'x-request-id': 'upstream-request-id',
-          'content-type': 'text/event-stream'
-        }
-      })
-      const req = createReq({ userAgent: 'codex-tui/0.154.0', body: { stream: true } })
-      req.on = jest.fn()
-      const res = createRes()
-      res.write = jest.fn()
-      res.end = jest.fn()
-      await openaiRoutes.handleResponses(req, res)
-      const chunk = Buffer.from(`data: ${JSON.stringify(event)}\n\n`)
-      handlers.data(chunk)
-      await handlers.end()
-      expect(res.write).toHaveBeenCalledWith(chunk)
-      expect(res.end).toHaveBeenCalled()
-      const logger = require('../src/utils/logger')
-      if (eventType === 'response.completed') {
-        expect(unifiedOpenAIScheduler.removeAccountRateLimit).toHaveBeenCalled()
-      } else {
-        expect(unifiedOpenAIScheduler.removeAccountRateLimit).not.toHaveBeenCalled()
-        expect(logger.warn).toHaveBeenCalledWith(
-          'Codex upstream stream failure',
-          expect.objectContaining({
-            upstreamRequestId: 'upstream-request-id',
-            eventType,
-            errorCode: 'server_error'
-          })
-        )
-        expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('private error text')
-      }
-    }
-  )
-
-  test.each(['codex-tui/0.154.0', 'Codex Desktop/0.154.0-alpha.6.2'])(
-    'preserves native payload and session headers in both directions: %s',
-    async (userAgent) => {
-      unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
-        accountId: 'openai-1',
-        accountType: 'openai'
-      })
-      openaiAccountService.getAccount.mockResolvedValue({
-        id: 'openai-1',
-        accessToken: 'encrypted',
-        accountId: 'upstream-1'
-      })
-      axios.post.mockResolvedValue({
-        status: 200,
-        data: { output: [] },
-        headers: { 'x-codex-turn-state': 'next-state', 'x-codex-turn-metadata': 'next-meta' }
-      })
-      const req = createReq({
-        userAgent,
-        apiKeyOverrides: {
-          enableOpenAIResponsesPayloadRules: true,
-          openaiResponsesPayloadRules: [{ path: 'model', valueType: 'string', value: 'rewritten' }]
-        },
-        body: {
-          model: 'gpt-6-astra',
-          stream: false,
-          instructions: 'original',
-          prompt_cache_key: 'cache-a',
-          store: false,
-          prompt_cache_options: { ttl: '30m' },
-          text: { verbosity: 'low' },
-          service_tier: 'priority'
-        }
-      })
-      req.headers.session_id = 'conversation-a'
-      req.headers.conversation_id = 'conversation-b'
-      req.headers.originator = 'client-originator'
-      req.headers['x-codex-turn-state'] = 'previous-state'
-      req.headers['x-codex-turn-metadata'] = 'previous-meta'
-      const res = createRes()
-      const originalBody = JSON.parse(JSON.stringify(req.body))
-      await openaiRoutes.handleResponses(req, res)
-      const forwarded = axios.post.mock.calls[0]
-      const headers = forwarded[2].headers
-      expect(headers.session_id).toBe('conversation-a')
-      expect(headers.conversation_id).toBe('conversation-b')
-      expect(headers['user-agent']).toBe(userAgent)
-      expect(headers.originator).toBe('client-originator')
-      expect(forwarded[1]).toEqual(originalBody)
-      expect(headers['x-codex-turn-state']).toBe('previous-state')
-      expect(headers['x-codex-turn-metadata']).toBe('previous-meta')
-      expect(forwarded[1].instructions).toBe('original')
-      expect(res.headers['x-codex-turn-state']).toBe('next-state')
-      expect(res.headers['x-codex-turn-metadata']).toBe('next-meta')
-    }
-  )
-
-  test('does not inject native session IDs, cache keys or store when absent', async () => {
+  test('isolates upstream session and passes turn state in both directions', async () => {
     unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
       accountId: 'openai-1',
       accountType: 'openai'
@@ -320,24 +194,36 @@ describe('openai responses payload toggles', () => {
       accessToken: 'encrypted',
       accountId: 'upstream-1'
     })
-    axios.post.mockResolvedValue({ status: 200, data: { output: [] }, headers: {} })
-    const body = {
-      model: 'gpt-5-2025-08-07',
-      stream: false,
-      input: [{ role: 'user', content: 'Long enough to trigger context fallback. '.repeat(10) }]
-    }
-    const req = createReq({ userAgent: 'codex-tui/0.154.0', body })
-    await openaiRoutes.handleResponses(req, createRes())
+    axios.post.mockResolvedValue({
+      status: 200,
+      data: { output: [] },
+      headers: { 'x-codex-turn-state': 'next-state', 'x-codex-turn-metadata': 'next-meta' }
+    })
+    const req = createReq({
+      userAgent: 'codex-tui/0.154.0',
+      body: {
+        model: 'gpt-6-astra',
+        stream: false,
+        instructions: 'original',
+        prompt_cache_key: 'conversation-a'
+      }
+    })
+    req.headers.session_id = 'conversation-a'
+    req.headers.conversation_id = 'conversation-a'
+    req.headers['x-codex-turn-state'] = 'previous-state'
+    req.headers['x-codex-turn-metadata'] = 'previous-meta'
+    const res = createRes()
+    await openaiRoutes.handleResponses(req, res)
     const forwarded = axios.post.mock.calls[0]
-    expect(forwarded[1]).toEqual(body)
-    expect(forwarded[2].headers.session_id).toBeUndefined()
-    expect(forwarded[2].headers.conversation_id).toBeUndefined()
-    expect(forwarded[2].headers['x-codex-turn-state']).toBeUndefined()
-    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
-      req.apiKey,
-      null,
-      body.model
-    )
+    const headers = forwarded[2].headers
+    expect(headers.session_id).not.toBe('conversation-a')
+    expect(headers.session_id).toBe(headers.conversation_id)
+    expect(headers.session_id).toBe(forwarded[1].prompt_cache_key)
+    expect(headers['x-codex-turn-state']).toBe('previous-state')
+    expect(headers['x-codex-turn-metadata']).toBe('previous-meta')
+    expect(forwarded[1].instructions).toBe('original')
+    expect(res.headers['x-codex-turn-state']).toBe('next-state')
+    expect(res.headers['x-codex-turn-metadata']).toBe('next-meta')
   })
 
   test('keeps standard responses payload unchanged for openai-responses when both toggles are off', async () => {
