@@ -184,6 +184,75 @@ describe('openai responses payload toggles', () => {
     openaiAccountService.decrypt.mockReturnValue('decrypted-token')
   })
 
+  test.each(['error', 'response.failed', 'response.completed'])(
+    'records actual stream outcome instead of treating HTTP 200 as completion: %s',
+    async (eventType) => {
+      const handlers = {}
+      const stream = {
+        on: jest.fn((name, fn) => {
+          handlers[name] = fn
+        })
+      }
+      const event =
+        eventType === 'error'
+          ? { type: 'error', code: 'server_error', message: 'private error text' }
+          : {
+              type: eventType,
+              response:
+                eventType === 'response.failed'
+                  ? { error: { code: 'server_error', message: 'private error text' } }
+                  : { model: 'gpt-6-astra' }
+            }
+      require('../src/utils/sseParser').IncrementalSSEParser.mockImplementationOnce(() => ({
+        feed: () => [{ type: 'data', data: event }],
+        getRemaining: () => ''
+      }))
+      unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+        accountId: 'openai-1',
+        accountType: 'openai'
+      })
+      unifiedOpenAIScheduler.isAccountRateLimited.mockResolvedValue(true)
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'openai-1',
+        accessToken: 'encrypted'
+      })
+      axios.post.mockResolvedValue({
+        status: 200,
+        data: stream,
+        headers: {
+          'x-request-id': 'upstream-request-id',
+          'content-type': 'text/event-stream'
+        }
+      })
+      const req = createReq({ userAgent: 'codex-tui/0.154.0', body: { stream: true } })
+      req.on = jest.fn()
+      const res = createRes()
+      res.write = jest.fn()
+      res.end = jest.fn()
+      await openaiRoutes.handleResponses(req, res)
+      const chunk = Buffer.from(`data: ${JSON.stringify(event)}\n\n`)
+      handlers.data(chunk)
+      await handlers.end()
+      expect(res.write).toHaveBeenCalledWith(chunk)
+      expect(res.end).toHaveBeenCalled()
+      const logger = require('../src/utils/logger')
+      if (eventType === 'response.completed') {
+        expect(unifiedOpenAIScheduler.removeAccountRateLimit).toHaveBeenCalled()
+      } else {
+        expect(unifiedOpenAIScheduler.removeAccountRateLimit).not.toHaveBeenCalled()
+        expect(logger.warn).toHaveBeenCalledWith(
+          'Codex upstream stream failure',
+          expect.objectContaining({
+            upstreamRequestId: 'upstream-request-id',
+            eventType,
+            errorCode: 'server_error'
+          })
+        )
+        expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('private error text')
+      }
+    }
+  )
+
   test.each(['codex-tui/0.154.0', 'Codex Desktop/0.154.0-alpha.6.2'])(
     'preserves native payload and session headers in both directions: %s',
     async (userAgent) => {
