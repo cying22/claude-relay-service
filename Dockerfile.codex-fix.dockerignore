@@ -1,0 +1,14 @@
+**
+!src/
+!src/routes/
+!src/routes/openaiRoutes.js
+!src/routes/admin/
+!src/routes/admin/openaiAccounts.js
+!src/services/
+!src/services/account/
+!src/services/account/openaiAccountService.js
+!web/
+!web/admin-spa/
+!web/admin-spa/**
+web/admin-spa/node_modules
+web/admin-spa/dist

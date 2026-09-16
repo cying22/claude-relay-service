@@ -40,3 +40,28 @@ git push origin main
 当前服务器的本地热修复 Dockerfile 和 Compose override 属于部署文件，没有纳入本补丁提交。它们基于固定的旧版官方镜像，不能作为未来自动升级的构建方式。
 
 更换隔离算法或首次启用本补丁会改变上游标识，可能产生冷缓存。验收时使用固定账号、模型和同一客户端会话连续对话，结合 `Codex session routing` 日志及缓存读取量判断效果。
+
+## Account native passthrough (2026-09-16)
+
+The deployment now defaults to the upstream v1.1.315 request handling. In Account
+Management, edit an OpenAI OAuth account and enable **Codex 原生透传（实验）**
+(`codexNativePassthrough`). Missing/false values use upstream behavior. This is
+independent of API Key > OpenAI Responses request processing.
+
+For recognized Codex CLI/TUI/Desktop requests on enabled accounts, the upstream
+JSON body is restored to the incoming payload, including model, store, text,
+service_tier and session/cache identifiers. The relay forwards native User-Agent,
+originator, conversation and turn-state headers; turn-state response headers are
+returned to the client. It does not synthesize, hash or infer upstream session IDs.
+Authentication is still supplied by the selected account. Account selection uses
+the existing scheduler; this toggle does not select an account for the caller.
+OpenAI-Responses accounts and non-Codex clients retain their existing behavior.
+
+For a controlled comparison, bind a test API Key to one OpenAI account, start a
+fresh Codex conversation, test with the switch off, then enable it and test a new
+conversation with the same model. Existing accounts are not automatically opted in.
+
+Deployment image: `claude-relay-service:1.1.315-account-native-toggle`.
+`Dockerfile.codex-fix` builds the admin UI and overlays only the changed backend
+files onto the official v1.1.315 image. To restore official behavior for all
+accounts immediately, deploy `weishaw/claude-relay-service:1.1.315` with `--no-build`.

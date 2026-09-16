@@ -497,6 +497,10 @@ async function createAccount(accountData) {
     isActive: accountData.isActive !== false ? 'true' : 'false',
     status: 'active',
     schedulable: accountData.schedulable !== false ? 'true' : 'false',
+    codexNativePassthrough:
+      accountData.codexNativePassthrough === true || accountData.codexNativePassthrough === 'true'
+        ? 'true'
+        : 'false',
     // 自动防护开关
     disableAutoProtection:
       accountData.disableAutoProtection === true || accountData.disableAutoProtection === 'true'
@@ -609,6 +613,13 @@ async function updateAccount(accountId, updates) {
   // subscriptionExpiresAt 是业务字段，与 token 刷新独立
   if (updates.subscriptionExpiresAt !== undefined) {
     // 直接保存，不做任何调整
+  }
+
+  if (updates.codexNativePassthrough !== undefined) {
+    updates.codexNativePassthrough =
+      updates.codexNativePassthrough === true || updates.codexNativePassthrough === 'true'
+        ? 'true'
+        : 'false'
   }
 
   // 处理 disableAutoProtection 布尔值转字符串

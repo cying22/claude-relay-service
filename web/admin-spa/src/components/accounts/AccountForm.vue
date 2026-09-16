@@ -1692,6 +1692,23 @@
                 </div>
               </div>
 
+              <div v-if="form.platform === 'openai'">
+                <label class="inline-flex cursor-pointer items-center">
+                  <input
+                    v-model="form.codexNativePassthrough"
+                    class="mr-2 rounded border-gray-300 text-blue-600"
+                    type="checkbox"
+                  />
+                  <span class="text-sm text-gray-700 dark:text-gray-300"
+                    >Codex 原生透传（实验）</span
+                  >
+                </label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  仅对此账号的原生 Codex
+                  请求生效。保留请求内容、会话标识和回合状态，跳过请求体适配及 API Key
+                  请求体规则；关闭时使用官方默认处理方式。
+                </p>
+              </div>
               <!-- 上游错误处理 -->
               <div v-if="autoProtectionPlatforms.includes(form.platform)">
                 <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
@@ -3598,6 +3615,20 @@
             </div>
           </div>
 
+          <div v-if="form.platform === 'openai'">
+            <label class="inline-flex cursor-pointer items-center">
+              <input
+                v-model="form.codexNativePassthrough"
+                class="mr-2 rounded border-gray-300 text-blue-600"
+                type="checkbox"
+              />
+              <span class="text-sm text-gray-700 dark:text-gray-300">Codex 原生透传（实验）</span>
+            </label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              仅对此账号的原生 Codex 请求生效。保留请求内容、会话标识和回合状态，跳过请求体适配及
+              API Key 请求体规则；关闭时使用官方默认处理方式。
+            </p>
+          </div>
           <!-- 上游错误处理（编辑模式）-->
           <div v-if="autoProtectionPlatforms.includes(form.platform)">
             <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
@@ -4616,6 +4647,7 @@ const form = ref({
   })(),
   userAgent: props.account?.userAgent || '',
   enableRateLimit: props.account ? props.account.rateLimitDuration > 0 : true,
+  codexNativePassthrough: toFormBoolean(props.account?.codexNativePassthrough),
   disableAutoProtection: toFormBoolean(props.account?.disableAutoProtection),
   disableTempUnavailable: toFormBoolean(props.account?.disableTempUnavailable),
   tempUnavailable503TtlSeconds: toFormCooldownOverrideValue(
@@ -5876,6 +5908,9 @@ const createAccount = async () => {
       data.schedulable = form.value.schedulable !== false
     }
 
+    if (form.value.platform === 'openai') {
+      data.codexNativePassthrough = !!form.value.codexNativePassthrough
+    }
     // 支持 disableAutoProtection 的平台才写入
     if (autoProtectionPlatforms.includes(form.value.platform)) {
       data.disableAutoProtection = !!form.value.disableAutoProtection
@@ -6272,6 +6307,9 @@ const updateAccount = async () => {
         : []
     }
 
+    if (form.value.platform === 'openai') {
+      data.codexNativePassthrough = !!form.value.codexNativePassthrough
+    }
     // 支持 disableAutoProtection 的平台才写入
     if (autoProtectionPlatforms.includes(props.account.platform)) {
       data.disableAutoProtection = !!form.value.disableAutoProtection
@@ -6851,6 +6889,7 @@ watch(
         // 并发控制字段
         maxConcurrentTasks: newAccount.maxConcurrentTasks || 0,
         // 上游错误处理
+        codexNativePassthrough: toFormBoolean(newAccount.codexNativePassthrough),
         disableAutoProtection: toFormBoolean(newAccount.disableAutoProtection),
         disableTempUnavailable: toFormBoolean(newAccount.disableTempUnavailable),
         tempUnavailable503TtlSeconds: toFormCooldownOverrideValue(

@@ -20,7 +20,6 @@ const {
   extractOpenAICacheReadTokens
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
-const { resolveSession, scopeSession, applySession } = require('../utils/openaiSessionIdentity')
 
 // Codex CLI 系统提示词（非 Codex CLI 客户端请求时注入，统一端点也使用）
 const CODEX_CLI_INSTRUCTIONS =
@@ -317,11 +316,13 @@ const handleResponses = async (req, res) => {
       })
     }
 
+    // Keep the original payload until the scheduler resolves the account's mode.
+    const originalBody = JSON.parse(JSON.stringify(req.body))
+
     // 判断是否为 Codex CLI 的请求（基于 User-Agent）
-    // 支持旧版 CLI/IDE、新版 TUI 和 Desktop（包括预发布版本）
+    // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式)
     const userAgent = req.headers['user-agent'] || ''
-    const codexCliPattern =
-      /^(codex_vscode|codex_cli_rs|codex_exec|codex-tui|Codex Desktop)\/\d+(?:\.\d+)*(?:-[\w.-]+)?(?:\s|$)/i
+    const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec)\/[\d.]+/i
     const isCodexCLI = codexCliPattern.test(userAgent)
 
     const standardResponsesRoute = isStandardResponsesRoute(req)
@@ -366,14 +367,19 @@ const handleResponses = async (req, res) => {
 
     // 从最终请求体中提取模型、会话 ID 和流式标志
     // NOTE: For some clients, prompt_cache_key is the only stable per-session key.
-    const sessionIdentity = resolveSession(req.headers, req.body)
-    const sessionId = scopeSession(apiKeyData.id, sessionIdentity)
+    const sessionId =
+      req.headers['session_id'] ||
+      req.headers['x-session-id'] ||
+      req.body?.session_id ||
+      req.body?.conversation_id ||
+      req.body?.prompt_cache_key ||
+      null
 
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
     const requestedModel = req.body?.model || null
     const schedulerModel = getCodexCompatibleModel(requestedModel)
-    const isStream = req.body?.stream !== false // 默认为流式（兼容现有行为）
+    let isStream = req.body?.stream !== false // 默认为流式（兼容现有行为）
 
     if (schedulerModel !== requestedModel) {
       logger.info(
@@ -394,7 +400,22 @@ const handleResponses = async (req, res) => {
       return await openaiResponsesRelayService.handleRequest(req, res, account, apiKeyData)
     }
 
-    if (schedulerModel !== requestedModel) {
+    const nativePassthrough =
+      (account.codexNativePassthrough === true || account.codexNativePassthrough === 'true') &&
+      /^(codex_vscode|codex_cli_rs|codex_exec|codex-tui|Codex Desktop)\/\d+(?:\.\d+)*(?:-[\w.-]+)?(?:\s|$)/i.test(
+        userAgent
+      )
+
+    if (nativePassthrough) {
+      req.body = originalBody
+      req._serviceTier = req.body?.service_tier || null
+      isStream = req.body?.stream !== false
+      logger.info('Account Codex native passthrough enabled', {
+        accountHash: crypto.createHash('sha256').update(accountId).digest('hex').slice(0, 16)
+      })
+    }
+
+    if (!nativePassthrough && schedulerModel !== requestedModel) {
       logger.info(
         `📝 Standard Responses request normalized model ${requestedModel} -> ${schedulerModel} for OpenAI Codex backend`
       )
@@ -406,14 +427,17 @@ const handleResponses = async (req, res) => {
     // 基于白名单构造上游所需的请求头，确保键为小写且值受控
     const incoming = req.headers || {}
 
-    const allowedKeys = [
-      'version',
-      'openai-beta',
-      'session_id',
-      'conversation_id',
-      'x-codex-turn-state',
-      'x-codex-turn-metadata'
-    ]
+    const allowedKeys = ['version', 'openai-beta', 'session_id']
+    if (nativePassthrough) {
+      allowedKeys.push(
+        'conversation_id',
+        'x-session-id',
+        'x-codex-turn-state',
+        'x-codex-turn-metadata',
+        'user-agent',
+        'originator'
+      )
+    }
 
     const headers = {}
     for (const key of allowedKeys) {
@@ -422,23 +446,24 @@ const handleResponses = async (req, res) => {
       }
     }
 
-    applySession(headers, req.body, apiKeyData.id, accountId, sessionIdentity)
-    logger.info('Codex session routing', {
-      source: sessionIdentity?.source || 'none',
-      sessionHash: sessionId?.slice(0, 16) || null,
-      accountHash: crypto.createHash('sha256').update(accountId).digest('hex').slice(0, 16),
-      hasTurnState: Boolean(headers['x-codex-turn-state'])
-    })
-
     // 覆盖或新增必要头部
     headers['authorization'] = `Bearer ${accessToken}`
     headers['chatgpt-account-id'] = account.accountId || account.chatgptUserId || accountId
     headers['host'] = 'chatgpt.com'
-    headers['accept'] = isStream ? 'text/event-stream' : 'application/json'
+    headers['accept'] =
+      nativePassthrough && incoming.accept
+        ? incoming.accept
+        : isStream
+          ? 'text/event-stream'
+          : 'application/json'
     headers['content-type'] = 'application/json'
-    if (!compactRoute) {
+    if (!nativePassthrough && !compactRoute) {
       req.body['store'] = false
-    } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
+    } else if (
+      !nativePassthrough &&
+      req.body &&
+      Object.prototype.hasOwnProperty.call(req.body, 'store')
+    ) {
       delete req.body['store']
     }
 
@@ -670,13 +695,8 @@ const handleResponses = async (req, res) => {
     }
 
     // 透传关键诊断头，避免传递不安全或与传输相关的头
-    const passThroughHeaderKeys = [
-      'openai-version',
-      'x-request-id',
-      'openai-processing-ms',
-      'x-codex-turn-state',
-      'x-codex-turn-metadata'
-    ]
+    const passThroughHeaderKeys = ['openai-version', 'x-request-id', 'openai-processing-ms']
+    if (nativePassthrough) passThroughHeaderKeys.push('x-codex-turn-state', 'x-codex-turn-metadata')
     for (const key of passThroughHeaderKeys) {
       const val = upstream.headers?.[key]
       if (val !== undefined) {

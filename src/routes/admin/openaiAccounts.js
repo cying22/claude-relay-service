@@ -353,7 +353,8 @@ router.post('/', authenticateAdmin, async (req, res) => {
       accountInfo: accountInfo || {},
       proxy: proxy || null,
       isActive: true,
-      schedulable: true
+      schedulable: true,
+      codexNativePassthrough: req.body.codexNativePassthrough === true
     }
 
     // 如果需要立即刷新且必须成功（OpenAI 手动模式）
